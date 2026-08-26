@@ -1,5 +1,36 @@
 # z486 MiSTer Verilator harness
 
+## Build
+
+The default simulator includes the x87 unit, matching the MiSTer build:
+
+```sh
+make
+```
+
+Use the explicit reduced target only when testing behavior without an FPU:
+
+```sh
+make no_x87
+```
+
+The binaries are `obj_dir/Vz486_mister_sim` and
+`obj_dir_no_x87/Vz486_mister_sim`, respectively.
+
+## Disk images
+
+Use `--disk` for the IDE0 hard-disk image and `--cdrom` for an IDE1 ISO image:
+
+```sh
+./obj_dir/Vz486_mister_sim \
+  --disk /tmp/dos.vhd \
+  --cdrom /tmp/game.iso
+```
+
+The CD-ROM model implements the ATAPI packet commands used by DOS CD drivers.
+Audio-track playback is accepted for software compatibility but is not rendered
+by the simulator.
+
 ## Live control socket
 
 Start the simulator with a localhost TCP control socket:

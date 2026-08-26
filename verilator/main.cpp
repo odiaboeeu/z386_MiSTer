@@ -77,6 +77,7 @@ static uint64_t flatline_trace_window = 8000000;
 static const uint64_t FLATLINE_HOLD_THRESHOLD = 150000; // posedges of frozen output
 
 static string disk_path = "../../sdcard/freedos.img";
+static string cdrom_path;
 static string floppy_path;
 static string boot0_path = "boot0.rom";
 static string boot1_path = "boot1.rom";
@@ -909,7 +910,7 @@ static bool dump_screen_png(const fs::path& path, int width, int height) {
 }
 
 static void usage() {
-	cout << "Usage: Vz486_mister_sim [--trace] [--trace-start sim_time] [--trace-file path] [--headless] [--end sim_time] [--disk path] [--floppy path] [--boot0 path] [--boot1 path] [--ram-mb 16|32|64|128] [--cpu-speed full|56|30|15] [--cpu-speed-at sim_time:full|56|30|15] [--opl2|--opl3] [--variable-vsync] [--vga-border|--no-vga-border] [--enter-at sim_time] [--key-at sim_time:key] [--key-down-at sim_time:key] [--key-up-at sim_time:key] [--key-on-text substring:key] [--mouse-at sim_time:dx:dy[:buttons]] [--control-port N] [--control-bind IPv4] [--ctrl-alt-del-at sim_time] [--screen-at sim_time] [--log-eip CS:EIP] [--screenshot-dir path] [--screenshot-interval sim_time] [--stop-on-text substring] [--no-ide] [--record] [--checkpoint-dir path] [--checkpoint-interval-sec N] [--checkpoint-keep N] [--restore path]  (all times are sim_time = 2*cycle; mouse buttons are bits L/R/M)\n";
+	cout << "Usage: Vz486_mister_sim [--trace] [--trace-start sim_time] [--trace-file path] [--headless] [--end sim_time] [--disk path] [--cdrom iso] [--floppy path] [--boot0 path] [--boot1 path] [--ram-mb 16|32|64|128] [--cpu-speed full|56|30|15] [--cpu-speed-at sim_time:full|56|30|15] [--opl2|--opl3] [--variable-vsync] [--vga-border|--no-vga-border] [--enter-at sim_time] [--key-at sim_time:key] [--key-down-at sim_time:key] [--key-up-at sim_time:key] [--key-on-text substring:key] [--mouse-at sim_time:dx:dy[:buttons]] [--control-port N] [--control-bind IPv4] [--ctrl-alt-del-at sim_time] [--screen-at sim_time] [--log-eip CS:EIP] [--screenshot-dir path] [--screenshot-interval sim_time] [--stop-on-text substring] [--no-ide] [--record] [--checkpoint-dir path] [--checkpoint-interval-sec N] [--checkpoint-keep N] [--restore path]  (all times are sim_time = 2*cycle; mouse buttons are bits L/R/M)\n";
 }
 
 int main(int argc, char** argv) {
@@ -973,6 +974,8 @@ int main(int argc, char** argv) {
 			max_cycles = std::stoull(argv[++i]) / 2;   // sim_time -> cycles
 		} else if (arg == "--disk" && i + 1 < argc) {
 			disk_path = argv[++i];
+		} else if (arg == "--cdrom" && i + 1 < argc) {
+			cdrom_path = argv[++i];
 		} else if (arg == "--jitter" && i + 1 < argc) {
 			hps_ide_set_jitter(true, (uint32_t)std::stoul(argv[++i]));
 		} else if (arg == "--floppy" && i + 1 < argc) {
@@ -1256,6 +1259,10 @@ int main(int argc, char** argv) {
 	ide1.set_debug(g_ide_debug);
 	if (restore_path.empty() && !ide0.open(disk_path)) {
 		cerr << "failed to open disk image " << disk_path << "\n";
+		return 1;
+	}
+	if (restore_path.empty() && !cdrom_path.empty() && !ide1.open_cdrom(cdrom_path)) {
+		cerr << "failed to open CD-ROM image " << cdrom_path << "\n";
 		return 1;
 	}
 	if (restore_path.empty() && !floppy_path.empty()) {
@@ -1698,6 +1705,7 @@ int main(int argc, char** argv) {
 			meta << "cycle " << cycle << "\n";
 			meta << "sim_time " << sim_time << "\n";
 			meta << "disk " << disk_path << "\n";
+			meta << "cdrom " << cdrom_path << "\n";
 			meta << "boot0 " << boot0_path << "\n";
 			meta << "boot1 " << boot1_path << "\n";
 		}

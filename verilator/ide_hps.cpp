@@ -113,7 +113,7 @@ HpsIde::HpsIde(uint8_t id, uint16_t base_addr) : id_(id), base_(base_addr) {}
 
 void HpsIde::save(std::ostream& out) const {
     const uint32_t magic = 0x48494445; // HIDE
-    const uint32_t version = 1;
+    const uint32_t version = 2;
     uint32_t state = static_cast<uint32_t>(state_);
     uint32_t next_state = static_cast<uint32_t>(next_state_);
     uint64_t sector_words_offset = std::numeric_limits<uint64_t>::max();
@@ -147,6 +147,16 @@ void HpsIde::save(std::ostream& out) const {
     write_pod(out, irq_pending_);
     write_pod(out, bus_cooldown_);
     write_pod(out, debug_);
+    write_pod(out, cdrom_);
+    write_pod(out, features_);
+    out.write(reinterpret_cast<const char*>(packet_), sizeof(packet_));
+    write_vector_u8(out, packet_data_);
+    write_pod(out, packet_lba_);
+    write_pod(out, packet_remaining_);
+    write_pod(out, packet_size_limit_);
+    write_pod(out, sense_key_);
+    write_pod(out, sense_asc_);
+    write_pod(out, sense_ascq_);
 }
 
 void HpsIde::load(std::istream& in) {
@@ -158,7 +168,7 @@ void HpsIde::load(std::istream& in) {
 
     read_pod(in, magic);
     read_pod(in, version);
-    if (magic != 0x48494445 || version != 1) {
+    if (magic != 0x48494445 || (version != 1 && version != 2)) {
         throw std::runtime_error("bad HpsIde checkpoint");
     }
 
@@ -183,6 +193,18 @@ void HpsIde::load(std::istream& in) {
     read_pod(in, irq_pending_);
     read_pod(in, bus_cooldown_);
     read_pod(in, debug_);
+    if (version >= 2) {
+        read_pod(in, cdrom_);
+        read_pod(in, features_);
+        in.read(reinterpret_cast<char*>(packet_), sizeof(packet_));
+        read_vector_u8(in, packet_data_);
+        read_pod(in, packet_lba_);
+        read_pod(in, packet_remaining_);
+        read_pod(in, packet_size_limit_);
+        read_pod(in, sense_key_);
+        read_pod(in, sense_asc_);
+        read_pod(in, sense_ascq_);
+    }
 
     if (sector_words_offset != std::numeric_limits<uint64_t>::max() &&
         sector_words_offset + 512 <= image_.size()) {
@@ -205,10 +227,33 @@ bool HpsIde::open(const string& path) {
     if (!f) return false;
 
     drive_.present = true;
+    cdrom_ = false;
     drive_.total_sectors = static_cast<uint32_t>(size / 512);
     size_t slash = path.find_last_of("/\\");
     image_name_ = (slash == string::npos) ? path : path.substr(slash + 1);
     set_geometry(63, 16);
+    return true;
+}
+
+bool HpsIde::open_cdrom(const string& path) {
+    ifstream f(path, ios::binary);
+    if (!f) return false;
+
+    f.seekg(0, ios::end);
+    size_t size = static_cast<size_t>(f.tellg());
+    f.seekg(0, ios::beg);
+    if (!size || (size % 2048) != 0) return false;
+
+    image_.resize(size);
+    f.read(reinterpret_cast<char*>(image_.data()), static_cast<std::streamsize>(size));
+    if (!f) return false;
+
+    drive_.present = true;
+    cdrom_ = true;
+    drive_.total_sectors = static_cast<uint32_t>(size / 2048);
+    size_t slash = path.find_last_of("/\\");
+    image_name_ = (slash == string::npos) ? path : path.substr(slash + 1);
+    update_identify();
     return true;
 }
 
@@ -223,6 +268,27 @@ void HpsIde::set_geometry(uint16_t sectors, uint16_t heads) {
 
 void HpsIde::update_identify() {
     std::memset(drive_.id, 0, sizeof(drive_.id));
+    if (cdrom_) {
+        drive_.id[0] = 0x8580;
+        set_ident_string(drive_.id, 10, 10, "AOCD00000");
+        set_ident_string(drive_.id, 23, 4, "1.0");
+        set_ident_string(drive_.id, 27, 20, "MiSTer CDROM");
+        drive_.id[49] = 1 << 9;
+        drive_.id[53] = 0x0007;
+        drive_.id[65] = 120;
+        drive_.id[66] = 120;
+        drive_.id[67] = 120;
+        drive_.id[68] = 120;
+        drive_.id[80] = 0x007E;
+        drive_.id[82] = (1 << 9) | (1 << 4);
+        drive_.id[83] = 1 << 14;
+        drive_.id[84] = 1 << 14;
+        drive_.id[85] = (1 << 14) | (1 << 9) | (1 << 4);
+        drive_.id[87] = 1 << 14;
+        drive_.id[93] = 1 | (1 << 14) | (1 << 13) | (1 << 9) |
+                        (1 << 8) | (1 << 3) | (1 << 1);
+        return;
+    }
     drive_.id[0] = 0x0040;
     drive_.id[1] = drive_.cylinders;
     drive_.id[2] = 0x0000;
@@ -330,6 +396,334 @@ void HpsIde::put_lba(uint32_t lba) {
     }
 }
 
+void HpsIde::send_packet_data(std::vector<uint8_t> data) {
+    if (packet_size_limit_ && data.size() > packet_size_limit_) {
+        data.resize(packet_size_limit_);
+    }
+    if (data.size() & 1) data.push_back(0);
+
+    if (debug_) {
+        cout << g_ide_time << ": IDE" << static_cast<int>(id_)
+             << ": ATAPI response " << data.size() << " bytes";
+        const size_t shown = std::min<size_t>(data.size(), 32);
+        for (size_t i = 0; i < shown; ++i) {
+            const uint8_t byte = data[i];
+            cout << ' ' << std::hex << static_cast<int>(byte >> 4)
+                 << static_cast<int>(byte & 0x0F);
+        }
+        if (shown < data.size()) cout << " ...";
+        cout << std::dec << "\n";
+    }
+
+    packet_data_ = std::move(data);
+    regs_.pkt_io_size = static_cast<uint16_t>(packet_data_.size() / 2);
+    regs_.cylinder = static_cast<uint32_t>(packet_data_.size());
+    regs_.sector_count = 2;
+    regs_.error = 0;
+    regs_.status = ATA_STATUS_RDY | ATA_STATUS_DRQ | ATA_STATUS_IRQ;
+    cnt_ = 0;
+    state_ = PACKET_SEND;
+}
+
+void HpsIde::finish_packet(uint8_t sense_key, uint8_t asc, uint8_t ascq) {
+    sense_key_ = sense_key;
+    sense_asc_ = asc;
+    sense_ascq_ = ascq;
+    regs_.sector_count = 3;
+    regs_.pkt_io_size = 0;
+    regs_.error = static_cast<uint8_t>(sense_key << 4);
+    regs_.status = ATA_STATUS_RDY | ATA_STATUS_IRQ |
+                   (sense_key ? ATA_STATUS_ERR : 0);
+    state_ = SET_REGS;
+    next_state_ = IDLE;
+}
+
+void HpsIde::prepare_cdrom_read() {
+    if (!packet_remaining_) {
+        finish_packet();
+        return;
+    }
+
+    uint32_t sectors = std::min<uint32_t>(packet_remaining_, 8);
+    if (packet_size_limit_ >= 2048) {
+        sectors = std::min<uint32_t>(sectors, packet_size_limit_ / 2048);
+    }
+    if (!sectors) sectors = 1;
+
+    const uint64_t offset = static_cast<uint64_t>(packet_lba_) * 2048;
+    const uint64_t bytes = static_cast<uint64_t>(sectors) * 2048;
+    if (offset + bytes > image_.size()) {
+        finish_packet(5, 0x21, 0); // illegal request: LBA out of range
+        return;
+    }
+
+    std::vector<uint8_t> data(static_cast<size_t>(bytes));
+    std::copy_n(image_.begin() + static_cast<size_t>(offset), data.size(), data.begin());
+    packet_lba_ += sectors;
+    packet_remaining_ -= sectors;
+    send_packet_data(std::move(data));
+}
+
+void HpsIde::handle_packet() {
+    auto be16 = [&](int offset) {
+        return static_cast<uint16_t>((packet_[offset] << 8) | packet_[offset + 1]);
+    };
+    auto be32 = [&](int offset) {
+        return (static_cast<uint32_t>(packet_[offset]) << 24) |
+               (static_cast<uint32_t>(packet_[offset + 1]) << 16) |
+               (static_cast<uint32_t>(packet_[offset + 2]) << 8) |
+               static_cast<uint32_t>(packet_[offset + 3]);
+    };
+    auto push_be32 = [](std::vector<uint8_t>& data, size_t offset, uint32_t value) {
+        data[offset] = static_cast<uint8_t>(value >> 24);
+        data[offset + 1] = static_cast<uint8_t>(value >> 16);
+        data[offset + 2] = static_cast<uint8_t>(value >> 8);
+        data[offset + 3] = static_cast<uint8_t>(value);
+    };
+
+    if (debug_) {
+        cout << g_ide_time << ": IDE" << static_cast<int>(id_)
+             << ": ATAPI packet";
+        for (uint8_t byte : packet_) {
+            cout << ' ' << std::hex << static_cast<int>(byte >> 4)
+                 << static_cast<int>(byte & 0x0F);
+        }
+        cout << std::dec << "\n";
+    }
+
+    switch (packet_[0]) {
+    case 0x00: // TEST UNIT READY
+    case 0x1B: // START STOP UNIT
+    case 0x1E: // PREVENT/ALLOW MEDIUM REMOVAL
+    case 0x2B: // SEEK(10)
+    case 0x35: // SYNCHRONIZE CACHE
+    case 0x45: // PLAY AUDIO(10), accepted without audio rendering
+    case 0x47: // PLAY AUDIO MSF
+    case 0x4B: // PAUSE/RESUME
+    case 0x4E: // STOP PLAY/SCAN
+        finish_packet();
+        break;
+
+    case 0x03: { // REQUEST SENSE
+        std::vector<uint8_t> data(18, 0);
+        data[0] = 0x70;
+        data[2] = sense_key_ & 0x0F;
+        data[7] = 10;
+        data[12] = sense_asc_;
+        data[13] = sense_ascq_;
+        if (packet_[4] < data.size()) data.resize(packet_[4]);
+        send_packet_data(std::move(data));
+        sense_key_ = sense_asc_ = sense_ascq_ = 0;
+        break;
+    }
+
+    case 0x12: { // INQUIRY
+        std::vector<uint8_t> data(36, 0);
+        data[0] = 5;
+        data[1] = 0x80;
+        data[3] = 0x21;
+        data[4] = 31;
+        const char vendor[] = "MiSTer  ";
+        const char product[] = "CDROM           ";
+        std::copy_n(vendor, 8, data.begin() + 8);
+        std::copy_n(product, 16, data.begin() + 16);
+        if (packet_[4] < data.size()) data.resize(packet_[4]);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    case 0x25: { // READ CAPACITY
+        std::vector<uint8_t> data(8, 0);
+        push_be32(data, 0, drive_.total_sectors ? drive_.total_sectors - 1 : 0);
+        push_be32(data, 4, 2048);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    case 0x28: // READ(10)
+        packet_lba_ = be32(2);
+        packet_remaining_ = be16(7);
+        prepare_cdrom_read();
+        break;
+
+    case 0xA8: // READ(12)
+        packet_lba_ = be32(2);
+        packet_remaining_ = be32(6);
+        prepare_cdrom_read();
+        break;
+
+    case 0x43: { // READ TOC, one cooked data track plus lead-out
+        const bool msf = (packet_[1] & 2) != 0;
+        // SFF-8020 ATAPI encodes the TOC format in byte 9. Newer MMC CDBs
+        // also define a format field in byte 2, so accept either form.
+        const uint8_t format = (packet_[9] >> 6) ? (packet_[9] >> 6)
+                                                        : (packet_[2] & 0x0F);
+        const uint16_t allocation = be16(7);
+        std::vector<uint8_t> data(4, 0);
+        data[2] = 1;
+        data[3] = 1;
+
+        auto append_descriptor = [&](uint8_t track, uint32_t lba) {
+            const size_t base = data.size();
+            data.resize(base + 8, 0);
+            data[base + 1] = 0x14; // ADR=1, CONTROL=data track
+            data[base + 2] = track;
+            if (msf) {
+                const uint32_t frame = lba + 150;
+                data[base + 5] = static_cast<uint8_t>(frame / (60 * 75));
+                data[base + 6] = static_cast<uint8_t>((frame / 75) % 60);
+                data[base + 7] = static_cast<uint8_t>(frame % 75);
+            } else {
+                push_be32(data, base + 4, lba);
+            }
+        };
+
+        if (format == 0) {
+            if (packet_[6] <= 1) append_descriptor(1, 0);
+            append_descriptor(0xAA, drive_.total_sectors);
+        } else if (format == 1) {
+            // Multisession information: one session, first track 1, and the
+            // start address of its first track (LBA 0 for a cooked ISO).
+            data.resize(12, 0);
+            data[1] = 0x0A;
+            data[2] = 1;
+            data[3] = 1;
+        } else {
+            finish_packet(5, 0x24, 0); // illegal request: invalid packet field
+            break;
+        }
+
+        if (allocation < data.size()) data.resize(allocation);
+        const uint16_t returned = data.size() >= 2 ? data.size() - 2 : 0;
+        if (!data.empty()) data[0] = static_cast<uint8_t>(returned >> 8);
+        if (data.size() > 1) data[1] = static_cast<uint8_t>(returned);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    case 0x42: { // READ SUB-CHANNEL
+        const bool subq = (packet_[2] & 0x40) != 0;
+        const uint16_t allocation = be16(7);
+        std::vector<uint8_t> data(subq ? 16 : 4, 0);
+        data[1] = 0x13; // audio play complete / not playing
+        if (subq) {
+            data[4] = 1;    // current-position data format
+            data[5] = 0x14; // ADR=1, CONTROL=data track
+            data[6] = 1;
+            data[7] = 1;
+        }
+        if (allocation < data.size()) data.resize(allocation);
+        const uint16_t returned = data.size() >= 4 ? data.size() - 4 : 0;
+        if (data.size() > 2) data[2] = static_cast<uint8_t>(returned >> 8);
+        if (data.size() > 3) data[3] = static_cast<uint8_t>(returned);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    case 0x5A: { // MODE SENSE(10)
+        std::vector<uint8_t> data(8, 0);
+        const uint8_t page = packet_[2] & 0x3F;
+        if (page == 0x2A || page == 0x3F) {
+            const uint8_t capabilities[] = {
+                0x2A, 0x14, 0x3B, 0x00, 0x71, 0x60, 0x29, 0x00,
+                0x02, 0xC0, 0x00, 0x02, 0x02, 0x00, 0x02, 0xC0,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            };
+            data.insert(data.end(), std::begin(capabilities), std::end(capabilities));
+            data[2] = 0x70;
+        } else {
+            const uint8_t unsupported[] = {page, 0x06, 0, 0, 0, 0, 0, 0};
+            data.insert(data.end(), std::begin(unsupported), std::end(unsupported));
+        }
+        const uint16_t allocation = be16(7);
+        if (allocation < data.size()) data.resize(allocation);
+        const uint16_t returned = data.size() >= 2 ? data.size() - 2 : 0;
+        if (!data.empty()) data[0] = static_cast<uint8_t>(returned >> 8);
+        if (data.size() > 1) data[1] = static_cast<uint8_t>(returned);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    case 0x46: { // GET CONFIGURATION
+        std::vector<uint8_t> data(16, 0);
+        data[3] = 12;
+        data[7] = 8;
+        data[10] = 3;
+        data[11] = 4;
+        data[13] = 8;
+        data[14] = 1;
+        const uint16_t allocation = be16(7);
+        if (allocation < data.size()) data.resize(allocation);
+        send_packet_data(std::move(data));
+        break;
+    }
+
+    default:
+        finish_packet(5, 0x20, 0); // illegal request: unsupported opcode
+        break;
+    }
+}
+
+void HpsIde::handle_cdrom_cmd() {
+    switch (cmd_) {
+    case 0xA1: { // IDENTIFY PACKET DEVICE
+        const uint8_t drv = regs_.drv;
+        regs_ = HpsIdeRegs{};
+        regs_.drv = drv;
+        regs_.pkt_io_size = 256;
+        regs_.status = ATA_STATUS_RDY | ATA_STATUS_DRQ | ATA_STATUS_IRQ | ATA_STATUS_END;
+        cnt_ = 0;
+        state_ = SEND_ID;
+        break;
+    }
+
+    case 0xA0: // PACKET
+        if (features_ & 1) {
+            finish_packet(5, 0x20, 0);
+            break;
+        }
+        packet_size_limit_ = static_cast<uint16_t>(regs_.cylinder);
+        if (!packet_size_limit_) packet_size_limit_ = 32 * 512;
+        regs_.pkt_io_size = 6;
+        regs_.sector_count = 1;
+        regs_.error = 0;
+        regs_.status = ATA_STATUS_RDY | ATA_STATUS_DRQ;
+        state_ = SET_REGS;
+        next_state_ = PACKET_WAIT_REQ;
+        break;
+
+    case 0x08: // DEVICE RESET
+        regs_.error = 1;
+        regs_.sector_count = 1;
+        regs_.sector = 1;
+        regs_.cylinder = 0xEB14;
+        regs_.head = 0;
+        regs_.pkt_io_size = 0;
+        regs_.status = 0;
+        state_ = SET_REGS;
+        next_state_ = IDLE;
+        break;
+
+    case 0xEF: // SET FEATURES
+        regs_.error = 0;
+        regs_.status = ATA_STATUS_RDY | ATA_STATUS_IRQ;
+        state_ = SET_REGS;
+        next_state_ = IDLE;
+        break;
+
+    case 0xEC: // ATA IDENTIFY must fail while retaining the ATAPI signature
+    default:
+        regs_.error = 0x04;
+        regs_.sector_count = 1;
+        regs_.sector = 1;
+        regs_.cylinder = 0xEB14;
+        regs_.status = ATA_STATUS_RDY | ATA_STATUS_ERR | ATA_STATUS_IRQ;
+        state_ = SET_REGS;
+        next_state_ = IDLE;
+        break;
+    }
+}
+
 void HpsIde::handle_cmd() {
     if (!drive_.present || regs_.drv != 0) {
         if (debug_) {
@@ -343,6 +737,11 @@ void HpsIde::handle_cmd() {
         regs_.status = ATA_STATUS_RDY | ATA_STATUS_ERR | ATA_STATUS_IRQ;
         state_ = SET_REGS;
         next_state_ = IDLE;
+        return;
+    }
+
+    if (cdrom_) {
+        handle_cdrom_cmd();
         return;
     }
 
@@ -461,7 +860,7 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
     if (tb.reset) {
         state_ = INITIAL;
         regs_ = HpsIdeRegs{};
-        regs_.status = ATA_STATUS_RDY;
+        regs_.status = cdrom_ ? 0 : ATA_STATUS_RDY;
         bus_cooldown_ = false;
         jitter_delay_ = 0;
         next_state_ = IDLE;
@@ -488,7 +887,7 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
         uint8_t req = id_ ? tb.ide1_request : tb.ide0_request;
 
         if (req == 4) {
-            pulse_read(tb, base_ + 1);
+            pulse_read(tb, base_ + 0);
             state_ = GET_CMD;
         } else if (req == 6) {
             pulse_read(tb, base_ + 5);
@@ -502,11 +901,12 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
         regs_.drv = (drv_addr_ >> 4) & 0x1;
         regs_.lba = (drv_addr_ >> 6) & 0x1;
         regs_.head = 0;
-        regs_.error = 0;
+        regs_.error = cdrom_ ? 1 : 0;
         regs_.sector = 1;
         regs_.sector_count = 1;
-        regs_.cylinder = (drive_.present && regs_.drv == 0) ? 0x0000 : 0xFFFF;
-        regs_.status = ATA_STATUS_RDY;
+        regs_.cylinder = (drive_.present && regs_.drv == 0) ?
+                         (cdrom_ ? 0xEB14 : 0x0000) : 0xFFFF;
+        regs_.status = cdrom_ ? 0 : ATA_STATUS_RDY;
         state_ = SET_REGS;
         next_state_ = RESET_SET;
         break;
@@ -518,6 +918,10 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
 
     case GET_CMD:
         switch (tb.mgmt_address & 0xF) {
+        case 0:
+            features_ = tb.mgmt_readdata >> 8;
+            pulse_read(tb, tb.mgmt_address + 1);
+            break;
         case 1:
             sector_count_ = tb.mgmt_readdata & 0xFF;
             sector_ = tb.mgmt_readdata >> 8;
@@ -568,9 +972,9 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
         break;
 
     case SET_REGS: {
-        if (!(regs_.status & ATA_STATUS_DRQ)) regs_.status |= ATA_STATUS_DSC;
+        if (!cdrom_ && !(regs_.status & ATA_STATUS_DRQ)) regs_.status |= ATA_STATUS_DSC;
 
-        buf_[0] = regs_.io_size;
+        buf_[0] = cdrom_ ? 0x80 : regs_.io_size;
         buf_[1] = regs_.error;
         buf_[2] = regs_.sector_count;
         buf_[3] = regs_.sector;
@@ -707,6 +1111,66 @@ void HpsIde::tick(Vz486_mister_sim& tb) {
             }
         }
         break;
+
+    case PACKET_WAIT_REQ: {
+        uint8_t req = id_ ? tb.ide1_request : tb.ide0_request;
+        if (req == 5) {
+            cnt_ = 0;
+            std::fill(std::begin(packet_), std::end(packet_), 0);
+            state_ = PACKET_RECV;
+        } else if (req != 0) {
+            state_ = IDLE;
+        }
+        break;
+    }
+
+    case PACKET_RECV:
+        if (cnt_ > 0) {
+            const uint16_t word = tb.mgmt_readdata;
+            packet_[(cnt_ - 1) * 2] = static_cast<uint8_t>(word);
+            packet_[(cnt_ - 1) * 2 + 1] = static_cast<uint8_t>(word >> 8);
+        }
+        if (cnt_ < 6) {
+            pulse_read(tb, base_ + 255);
+            cnt_++;
+        } else {
+            cnt_ = 0;
+            // Reading the packet advanced the shared management-buffer
+            // pointer. Main_MiSTer resets it before placing response data at
+            // word zero; without this, the guest reads the packet back.
+            pulse_write(tb, base_ + 7, 0);
+            state_ = PACKET_HANDLE;
+        }
+        break;
+
+    case PACKET_HANDLE:
+        handle_packet();
+        break;
+
+    case PACKET_SEND:
+        if (cnt_ < regs_.pkt_io_size) {
+            const size_t offset = static_cast<size_t>(cnt_) * 2;
+            const uint16_t word = static_cast<uint16_t>(packet_data_[offset]) |
+                                  (static_cast<uint16_t>(packet_data_[offset + 1]) << 8);
+            pulse_write(tb, base_ + 255, word);
+            cnt_++;
+        } else {
+            cnt_ = 0;
+            state_ = SET_REGS;
+            next_state_ = PACKET_READ_WAIT_REQ;
+        }
+        break;
+
+    case PACKET_READ_WAIT_REQ: {
+        uint8_t req = id_ ? tb.ide1_request : tb.ide0_request;
+        if (req == 5) {
+            if (packet_remaining_) prepare_cdrom_read();
+            else finish_packet();
+        } else if (req != 0) {
+            state_ = IDLE;
+        }
+        break;
+    }
     }
 
     if (tb.mgmt_read || tb.mgmt_write) {

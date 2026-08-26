@@ -44,6 +44,7 @@ public:
     explicit HpsIde(uint8_t id, uint16_t base_addr);
 
     bool open(const std::string& path);
+    bool open_cdrom(const std::string& path);
     bool present() const { return drive_.present; }
     void set_debug(bool debug) { debug_ = debug; }
     void tick(Vz486_mister_sim& tb);
@@ -68,13 +69,23 @@ private:
         WRITE,
         WRITE_REGS,
         WRITE_WAIT_REQ,
-        WRITE_RECV
+        WRITE_RECV,
+        PACKET_WAIT_REQ,
+        PACKET_RECV,
+        PACKET_SEND,
+        PACKET_READ_WAIT_REQ,
+        PACKET_HANDLE
     };
 
     void pulse_read(Vz486_mister_sim& tb, uint16_t addr);
     void pulse_write(Vz486_mister_sim& tb, uint16_t addr, uint16_t data);
     void clear_bus(Vz486_mister_sim& tb);
     void handle_cmd();
+    void handle_cdrom_cmd();
+    void handle_packet();
+    void prepare_cdrom_read();
+    void send_packet_data(std::vector<uint8_t> data);
+    void finish_packet(uint8_t sense_key = 0, uint8_t asc = 0, uint8_t ascq = 0);
     void set_geometry(uint16_t sectors, uint16_t heads);
     void update_identify();
     uint32_t get_lba() const;
@@ -94,12 +105,22 @@ private:
     uint32_t cylinder_ = 0;
     uint8_t drv_addr_ = 0;
     uint8_t cmd_ = 0;
+    uint8_t features_ = 0;
     uint8_t buf_[12] = {};
+    uint8_t packet_[12] = {};
+    std::vector<uint8_t> packet_data_;
+    uint32_t packet_lba_ = 0;
+    uint32_t packet_remaining_ = 0;
+    uint16_t packet_size_limit_ = 0;
+    uint8_t sense_key_ = 0;
+    uint8_t sense_asc_ = 0;
+    uint8_t sense_ascq_ = 0;
     int cnt_ = 0;
     uint8_t irq_pending_ = 0;
     bool bus_cooldown_ = false;
     int  jitter_delay_ = 0;     // extra idle cycles after a bus op (disk-latency jitter)
     bool debug_ = false;
+    bool cdrom_ = false;
 };
 
 // Enable/seed deterministic HPS disk-latency jitter (vary img_ack/data-ready
