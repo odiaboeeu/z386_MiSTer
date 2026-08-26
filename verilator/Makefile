@@ -2,7 +2,7 @@ VERILATOR = verilator
 VERILATOR_BUILD_JOBS ?= 8
 SIM_OPT_LEVEL ?= -O2
 SIM_CLOCK_HZ ?= 20000000
-ENABLE_X87 ?= 0
+ENABLE_X87 ?= 1
 OBJ_DIR ?= obj_dir
 ifeq ($(shell uname -s),Darwin)
 SIM_ARCH_FLAGS ?= -mcpu=native
@@ -60,8 +60,11 @@ CPP_SOURCES = main.cpp ide_hps.cpp control_server.cpp
 
 all: $(OBJ_DIR)/Vz486_mister_sim
 
-$(OBJ_DIR)/Vz486_mister_sim: $(SOURCES) $(CPP_SOURCES) ../src/z486/ucode.hex
+$(OBJ_DIR)/Vz486_mister_sim: $(SOURCES) $(CPP_SOURCES) ../src/z486/ucode.hex \
+		../src/z486/pla_entry_rom.hex ../src/z486/pla_group_entry.hex Makefile
 	ln -sf ../src/z486/ucode.hex .
+	ln -sf ../src/z486/pla_entry_rom.hex .
+	ln -sf ../src/z486/pla_group_entry.hex .
 	$(VERILATOR) $(VERILATOR_FLAGS) $(VERILATOR_INCLUDE) $(SOURCES) $(CPP_SOURCES)
 
 run: $(OBJ_DIR)/Vz486_mister_sim
@@ -73,14 +76,16 @@ trace: $(OBJ_DIR)/Vz486_mister_sim
 sim85:
 	$(MAKE) OBJ_DIR=obj_dir_85 SIM_CLOCK_HZ=85000000 all
 
-x87:
-	$(MAKE) OBJ_DIR=obj_dir_x87 ENABLE_X87=1 all
+x87: all
+
+no_x87:
+	$(MAKE) OBJ_DIR=obj_dir_no_x87 ENABLE_X87=0 all
 
 x87-50:
 	$(MAKE) OBJ_DIR=obj_dir_x87_50 SIM_CLOCK_HZ=50000000 ENABLE_X87=1 all
 
 clean:
 	rm -rf $(OBJ_DIR) obj_dir_trace
-	rm -f ucode.hex waveform.fst
+	rm -f ucode.hex pla_entry_rom.hex pla_group_entry.hex waveform.fst
 
-.PHONY: all run trace sim85 x87 x87-50 clean
+.PHONY: all run trace sim85 x87 no_x87 x87-50 clean
