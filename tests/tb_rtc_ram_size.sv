@@ -9,12 +9,18 @@ module tb_rtc_ram_size;
     logic io_write = 0;
     logic [7:0] io_writedata = 0;
     logic [7:0] io_readdata;
+    logic [7:0] io_readdata_no_fpu;
+    logic [7:0] mgmt_address = 0;
+    logic mgmt_write = 0;
+    logic [7:0] mgmt_writedata = 0;
     logic irq;
     integer rtc_ticks;
 
     always #5 clk = ~clk;
 
-    rtc dut (
+    rtc #(
+        .FPU_PRESENT(1'b1)
+    ) dut (
         .clk(clk),
         .rst_n(rst_n),
         .irq(irq),
@@ -25,9 +31,26 @@ module tb_rtc_ram_size;
         .io_writedata(io_writedata),
         .bootcfg(6'd0),
         .ram_size(ram_size),
-        .mgmt_address(8'd0),
-        .mgmt_write(1'b0),
-        .mgmt_writedata(8'd0),
+        .mgmt_address(mgmt_address),
+        .mgmt_write(mgmt_write),
+        .mgmt_writedata(mgmt_writedata),
+        .clock_rate(28'd85_000_000)
+    );
+
+    rtc dut_no_fpu (
+        .clk(clk),
+        .rst_n(rst_n),
+        .irq(),
+        .io_address(io_address),
+        .io_read(io_read),
+        .io_readdata(io_readdata_no_fpu),
+        .io_write(io_write),
+        .io_writedata(io_writedata),
+        .bootcfg(6'd0),
+        .ram_size(ram_size),
+        .mgmt_address(mgmt_address),
+        .mgmt_write(mgmt_write),
+        .mgmt_writedata(mgmt_writedata),
         .clock_rate(28'd85_000_000)
     );
 
@@ -39,6 +62,33 @@ module tb_rtc_ram_size;
             io_write = 1;
             @(negedge clk);
             io_write = 0;
+        end
+    endtask
+
+    task automatic write_mgmt_cmos(input logic [7:0] address, input logic [7:0] data);
+        begin
+            @(negedge clk);
+            mgmt_address = address;
+            mgmt_writedata = data;
+            mgmt_write = 1;
+            @(negedge clk);
+            mgmt_write = 0;
+        end
+    endtask
+
+    task automatic expect_cmos_no_fpu(input logic [6:0] address, input logic [7:0] expected);
+        begin
+            select_cmos(address);
+            @(negedge clk);
+            io_address = 1;
+            io_read = 1;
+            @(negedge clk);
+            io_read = 0;
+            if (io_readdata_no_fpu !== expected) begin
+                $error("no-FPU CMOS %02h: expected %02h, got %02h",
+                       address, expected, io_readdata_no_fpu);
+                $fatal;
+            end
         end
     endtask
 
@@ -67,8 +117,11 @@ module tb_rtc_ram_size;
         expect_cmos(7'h31, 8'h3C);
         expect_cmos(7'h34, 8'h00);
         expect_cmos(7'h35, 8'h00);
+        expect_cmos(7'h14, 8'h06);
         expect_cmos(7'h2E, 8'h00);
-        expect_cmos(7'h2F, 8'h00);
+        expect_cmos(7'h2F, 8'h06);
+        expect_cmos_no_fpu(7'h14, 8'h04);
+        expect_cmos_no_fpu(7'h2F, 8'h04);
 
         ram_size = 1;
         expect_cmos(7'h17, 8'h00);
@@ -78,7 +131,7 @@ module tb_rtc_ram_size;
         expect_cmos(7'h34, 8'h00);
         expect_cmos(7'h35, 8'h01);
         expect_cmos(7'h2E, 8'h00);
-        expect_cmos(7'h2F, 8'h40);
+        expect_cmos(7'h2F, 8'h46);
 
         ram_size = 2;
         expect_cmos(7'h17, 8'h00);
@@ -88,7 +141,7 @@ module tb_rtc_ram_size;
         expect_cmos(7'h34, 8'h00);
         expect_cmos(7'h35, 8'h03);
         expect_cmos(7'h2E, 8'h00);
-        expect_cmos(7'h2F, 8'hC0);
+        expect_cmos(7'h2F, 8'hC6);
 
         ram_size = 3;
         expect_cmos(7'h17, 8'hFF);
@@ -98,7 +151,20 @@ module tb_rtc_ram_size;
         expect_cmos(7'h34, 8'h00);
         expect_cmos(7'h35, 8'h07);
         expect_cmos(7'h2E, 8'h01);
-        expect_cmos(7'h2F, 8'hC2);
+        expect_cmos(7'h2F, 8'hC8);
+
+        // Preserve Main's equipment byte and adjust its checksum only for
+        // synthesized equipment bits that are not already present.
+        ram_size = 0;
+        write_mgmt_cmos(8'h14, 8'h4D);
+        write_mgmt_cmos(8'h2E, 8'h12);
+        write_mgmt_cmos(8'h2F, 8'h34);
+        expect_cmos(7'h14, 8'h4F);
+        expect_cmos(7'h2E, 8'h12);
+        expect_cmos(7'h2F, 8'h36);
+        expect_cmos_no_fpu(7'h14, 8'h4D);
+        expect_cmos_no_fpu(7'h2E, 8'h12);
+        expect_cmos_no_fpu(7'h2F, 8'h34);
 
         // Ten milliseconds at 85 MHz must produce about 82 RTC base ticks.
         rtc_ticks = 0;

@@ -24,7 +24,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-module rtc (
+module rtc #(
+	parameter [0:0] FPU_PRESENT = 1'b0
+) (
 	input             clk,
 	input             rst_n,
 
@@ -76,16 +78,19 @@ wire rtc_second_update = rtc_clock_running && ce_8192hz && second_major == 13'd0
 
 reg [7:0] mgmt_ext_mem_lsb;
 reg [7:0] mgmt_ext_mem_msb;
+reg [7:0] mgmt_equipment;
 reg [15:0] mgmt_checksum;
 
 always @(posedge clk) begin
 	if(rst_n == 1'b0) begin
 		mgmt_ext_mem_lsb <= 8'h00;
 		mgmt_ext_mem_msb <= 8'h3C;
+		mgmt_equipment <= 8'h00;
 		mgmt_checksum <= 16'd0;
 	end else if(mgmt_write) begin
 		if(mgmt_address == 8'h17) mgmt_ext_mem_lsb <= mgmt_writedata;
 		if(mgmt_address == 8'h18) mgmt_ext_mem_msb <= mgmt_writedata;
+		if(mgmt_address == 8'h14) mgmt_equipment <= mgmt_writedata;
 		if(mgmt_address == 8'h2E) mgmt_checksum[15:8] <= mgmt_writedata;
 		if(mgmt_address == 8'h2F) mgmt_checksum[7:0] <= mgmt_writedata;
 	end
@@ -106,6 +111,14 @@ end
 wire [15:0] configured_checksum =
     mgmt_checksum + {8'd0, configured_ext_mem[7:0]} + {8'd0, configured_ext_mem[15:8]}
                   - {8'd0, mgmt_ext_mem_lsb} - {8'd0, mgmt_ext_mem_msb};
+// The integrated 8042 always exposes a PS/2 pointing-device port. BIOS INT
+// 11h copies CMOS equipment bit 2 into the BDA, and DOS mouse drivers check
+// that bit before calling the INT 15h/C2 services. Keep both synthesized
+// equipment bits reflected in the checksum when absent from the HPS value.
+wire [7:0] configured_equipment = mgmt_equipment |
+    {5'd0, 1'b1, FPU_PRESENT, 1'b0};
+wire [15:0] configured_checksum_with_equipment = configured_checksum +
+    {13'd0, ~mgmt_equipment[2], FPU_PRESENT && ~mgmt_equipment[1], 1'b0};
 
 reg io_read_last;
 always @(posedge clk) begin if(rst_n == 1'b0) io_read_last <= 1'b0; else if(io_read_last) io_read_last <= 1'b0; else io_read_last <= io_read; end 
@@ -134,10 +147,11 @@ wire [7:0] io_readdata_next =
     (ram_address == 7'h3D) ? {2'b00, bootcfg[3:2], 2'b00, bootcfg[1:0]} :
     (ram_address == 7'h32) ? rtc_century :
     (ram_address == 7'h37) ? rtc_century :
+    (ram_address == 7'h14) ? configured_equipment :
     (ram_address == 7'h17) ? configured_ext_mem[7:0] :
     (ram_address == 7'h18) ? configured_ext_mem[15:8] :
-    (ram_address == 7'h2E) ? configured_checksum[15:8] :
-    (ram_address == 7'h2F) ? configured_checksum[7:0] :
+    (ram_address == 7'h2E) ? configured_checksum_with_equipment[15:8] :
+    (ram_address == 7'h2F) ? configured_checksum_with_equipment[7:0] :
     (ram_address == 7'h30) ? configured_ext_mem[7:0] :
     (ram_address == 7'h31) ? configured_ext_mem[15:8] :
     (ram_address == 7'h34) ? configured_ext_mem_64k[7:0] :

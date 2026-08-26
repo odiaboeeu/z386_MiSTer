@@ -1104,7 +1104,9 @@ ps2 ps2
 	.irq_mouse         (irq_12)
 );
 
-rtc rtc
+rtc #(
+	.FPU_PRESENT       (ENABLE_X87)
+) rtc
 (
 	.clk               (clk_sys),
 	.rst_n             (~rst[8]),
