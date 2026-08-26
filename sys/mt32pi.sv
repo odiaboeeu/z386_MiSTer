@@ -65,11 +65,12 @@ generate
 	genvar i;
 	for(i = 0; i<2; i++) begin : clk_rate
 		wire clk_in = i ? USER_IN[6] : USER_IN[4];
-		reg [4:0] cnt;
+		reg [4:0] cnt = 0;
+		reg [4:0] cnt_tmp = 0;
+		reg       clk_sr = 0;
+		reg       clk = 0;
+		reg       old_clk = 0;
 		always @(posedge CLK_AUDIO) begin : clkr
-			reg       clk_sr, clk, old_clk;
-			reg [4:0] cnt_tmp;
-
 			clk_sr <= clk_in;
 			if (clk_sr == clk_in) clk <= clk_sr;
 
@@ -84,7 +85,7 @@ generate
 		end
 	end
 	
-	reg crossed;
+	reg crossed = 0;
 	always @(posedge CLK_AUDIO) crossed <= (clk_rate[0].cnt <= clk_rate[1].cnt);
 endgenerate
 
@@ -98,21 +99,22 @@ assign midi_rx  = ~mt32_available ? USER_IN[0] : crossed ? USER_IN[6] : USER_IN[
 // i2s receiver
 //
 
-always @(posedge CLK_AUDIO) begin : i2s_proc
-	reg [15:0] i2s_buf = 0;
-	reg  [4:0] i2s_cnt = 0;
-	reg        clk_sr;
-	reg        i2s_clk = 0;
-	reg        old_clk, old_ws;
-	reg        i2s_next = 0;
+reg [15:0] i2s_buf = 0;
+reg  [4:0] i2s_cnt = 0;
+reg        i2s_clk_sr = 0;
+reg        i2s_clk = 0;
+reg        i2s_old_clk = 0;
+reg        i2s_old_ws = 0;
+reg        i2s_next = 0;
 
+always @(posedge CLK_AUDIO) begin : i2s_proc
 	// Debounce clock
-	clk_sr <= i2s_bclk;
-	if (clk_sr == i2s_bclk) i2s_clk <= clk_sr;
+	i2s_clk_sr <= i2s_bclk;
+	if (i2s_clk_sr == i2s_bclk) i2s_clk <= i2s_clk_sr;
 
 	// Latch data and ws on rising edge
-	old_clk <= i2s_clk;
-	if (i2s_clk && ~old_clk) begin
+	i2s_old_clk <= i2s_clk;
+	if (i2s_clk && ~i2s_old_clk) begin
 
 		if (~i2s_cnt[4]) begin
 			i2s_cnt <= i2s_cnt + 1'd1;
@@ -120,8 +122,8 @@ always @(posedge CLK_AUDIO) begin : i2s_proc
 		end
 
 		// Word Select will change 1 clock before the new word starts
-		old_ws <= i2s_ws;
-		if (old_ws != i2s_ws) i2s_next <= 1;
+		i2s_old_ws <= i2s_ws;
+		if (i2s_old_ws != i2s_ws) i2s_next <= 1;
 	end
 
 	if (i2s_next) begin
@@ -129,12 +131,23 @@ always @(posedge CLK_AUDIO) begin : i2s_proc
 		i2s_cnt <= 0;
 		i2s_buf <= 0;
 
-		if (i2s_ws) mt32_i2s_l <= i2s_buf;
-		else        mt32_i2s_r <= i2s_buf;
+		// USER_IN may toggle when no MT32-pi is attached.  Do not expose those
+		// asynchronous pins to the audio mixer until the I2C handshake has
+		// positively identified the device.
+		if (mt32_available) begin
+			if (i2s_ws) mt32_i2s_l <= i2s_buf;
+			else        mt32_i2s_r <= i2s_buf;
+		end
 	end
 	
 	if (reset) begin
 		i2s_buf    <= 0;
+		i2s_cnt    <= 0;
+		i2s_clk_sr <= 0;
+		i2s_clk    <= 0;
+		i2s_old_clk <= 0;
+		i2s_old_ws <= 0;
+		i2s_next   <= 0;
 		mt32_i2s_l <= 0;
 		mt32_i2s_r <= 0;
 	end
@@ -153,101 +166,101 @@ reg        reset_r  = 0;
 wire [7:0] mode_req = reset_r ? 8'hA0 : mt32_mode_req ? 8'hA2 : 8'hA1;
 wire [7:0] rom_req  = {6'd0, mt32_rom_req};
 
+reg        i2c_sda_sr = 1;
+reg        i2c_scl_sr = 1;
+reg        i2c_old_sda = 1;
+reg        i2c_old_scl = 1;
+reg        i2c_sda = 1;
+reg        i2c_scl = 1;
+reg  [7:0] i2c_tmp = 0;
+reg  [3:0] i2c_cnt = 0;
+reg [10:0] i2c_bcnt = 0;
+reg        i2c_ack = 0;
+reg        i2c_rw = 0;
+reg        i2c_disp = 0;
+reg        i2c_dispdata = 0;
+reg  [2:0] i2c_div = 0;
+
 always @(posedge CLK_AUDIO) begin : i2c_slave
-	reg        sda_sr, scl_sr;
-	reg        old_sda, old_scl;
-	reg        sda, scl;
-	reg  [7:0] tmp;
-	reg  [3:0] cnt = 0;
-	reg [10:0] bcnt = 0;
-	reg        ack;
-	reg        i2c_rw;
-	reg        disp, dispdata;
-	reg  [2:0] div;
-	reg        old_reset;
-	
-	old_reset <= reset;
-	if(old_reset & ~reset) sda_out <= 1;
+	i2c_div <= i2c_div + 1'd1;
+	if(i2c_div == 0) begin
+		i2c_sda_sr <= USER_IN[0];
+		if(i2c_sda_sr == USER_IN[0]) i2c_sda <= i2c_sda_sr;
+		i2c_old_sda <= i2c_sda;
 
-	div <= div + 1'd1;
-	if(!div) begin
-		sda_sr <= USER_IN[0];
-		if(sda_sr == USER_IN[0]) sda <= sda_sr;
-		old_sda <= sda;
-
-		scl_sr <= USER_IN[3];
-		if(scl_sr == USER_IN[3]) scl <= scl_sr;
-		old_scl <= scl;
+		i2c_scl_sr <= USER_IN[3];
+		if(i2c_scl_sr == USER_IN[3]) i2c_scl <= i2c_scl_sr;
+		i2c_old_scl <= i2c_scl;
 
 		//start
-		if(old_scl & scl & old_sda & ~sda) begin
-			cnt <= 9;
-			bcnt <= 0;
-			ack <= 0;
+		if(i2c_old_scl & i2c_scl & i2c_old_sda & ~i2c_sda) begin
+			i2c_cnt <= 9;
+			i2c_bcnt <= 0;
+			i2c_ack <= 0;
 			i2c_rw <= 0;
-			disp <= 0;
-			dispdata <= 0;
+			i2c_disp <= 0;
+			i2c_dispdata <= 0;
 		end
 
 		//stop
-		if(old_scl & scl & ~old_sda & sda) begin
-			cnt <= 0;
-			if(dispdata) begin
-				lcd_sz <= ~bcnt[9];
+		if(i2c_old_scl & i2c_scl & ~i2c_old_sda & i2c_sda) begin
+			i2c_cnt <= 0;
+			if(i2c_dispdata) begin
+				lcd_sz <= ~i2c_bcnt[9];
 				mt32_lcd_update <= ~mt32_lcd_update;
 			end
 		end
 
 		//data latch
-		if(~old_scl && scl && cnt) begin
-			tmp <= {tmp[6:0], sda};
-			cnt <= cnt - 1'd1;
+		if(~i2c_old_scl && i2c_scl && (i2c_cnt != 0)) begin
+			i2c_tmp <= {i2c_tmp[6:0], i2c_sda};
+			i2c_cnt <= i2c_cnt - 1'd1;
 		end
 
-		if(!cnt) sda_out <= 1;
+		if(i2c_cnt == 0) sda_out <= 1;
 
 		//data set
-		if(old_scl && ~scl) begin
+		if(i2c_old_scl && ~i2c_scl) begin
 			sda_out <= 1;
-			if(cnt == 1) begin
-				if(!bcnt) begin
-					if(tmp[7:1] == 'h45 || tmp[7:1] == 'h3c) begin
-						disp <= (tmp[7:1] == 'h3c);
+			if(i2c_cnt == 1) begin
+				if(i2c_bcnt == 0) begin
+					if(i2c_tmp[7:1] == 'h45 || i2c_tmp[7:1] == 'h3c) begin
+						i2c_disp <= (i2c_tmp[7:1] == 'h3c);
 						sda_out <= 0;
 						mt32_available <= 1;
-						ack <= 1;
-						i2c_rw <= tmp[0];
-						bcnt <= bcnt + 1'd1;
-						cnt <= 10;
+						i2c_ack <= 1;
+						i2c_rw <= i2c_tmp[0];
+						i2c_bcnt <= i2c_bcnt + 1'd1;
+						i2c_cnt <= 10;
 					end
 					else begin
 						// wrong address, stop
-						cnt <= 0;
+						i2c_cnt <= 0;
 					end
 				end
-				else if(ack) begin
+				else if(i2c_ack) begin
 					if(~i2c_rw) begin
-						if(disp) begin
-							if(bcnt == 1) dispdata <= (tmp[7:6] == 2'b01);
-							else if(dispdata) lcd_data[bcnt[9:0] - 2'd2] <= tmp;
+						if(i2c_disp) begin
+							if(i2c_bcnt == 1) i2c_dispdata <= (i2c_tmp[7:6] == 2'b01);
+							else if(i2c_dispdata) lcd_data[i2c_bcnt[9:0] - 10'd2] <= i2c_tmp;
 						end
 						else begin
-							if(bcnt == 1) mt32_mode <= tmp;
-							if(bcnt == 2) mt32_rom  <= tmp;
-							if(bcnt == 3) mt32_sf   <= tmp;
-							if(bcnt == 3) mt32_newmode <= ~mt32_newmode;
+							if(i2c_bcnt == 1) mt32_mode <= i2c_tmp;
+							if(i2c_bcnt == 2) mt32_rom  <= i2c_tmp;
+							if(i2c_bcnt == 3) mt32_sf   <= i2c_tmp;
+							if(i2c_bcnt == 3) mt32_newmode <= ~mt32_newmode;
 						end
 					end
-					if(~&bcnt) bcnt <= bcnt + 1'd1;
+					if(~&i2c_bcnt) i2c_bcnt <= i2c_bcnt + 1'd1;
 					sda_out <= 0;
-					cnt <= 10;
+					i2c_cnt <= 10;
 				end
 			end
-			else if(i2c_rw && ack && cnt && ~disp) begin
-				if(bcnt == 1) sda_out <= mode_req[cnt[2:0] - 2'd2];
-				if(bcnt == 2) sda_out <= rom_req[cnt[2:0] - 2'd2];
-				if(bcnt == 3) sda_out <= mt32_sf_req[cnt[2:0] - 2'd2];
-				if(bcnt == 3) reset_r <= 0;
+			else if(i2c_rw && i2c_ack && (i2c_cnt != 0) && ~i2c_disp) begin
+				if(i2c_bcnt == 1) sda_out <= mode_req[i2c_cnt[2:0] - 2'd2];
+				if(i2c_bcnt == 2) sda_out <= rom_req[i2c_cnt[2:0] - 2'd2];
+				if(i2c_bcnt == 3) sda_out <= mt32_sf_req[i2c_cnt[2:0] - 2'd2];
+				if(i2c_bcnt == 3) reset_r <= 0;
 			end
 		end
 	end
@@ -255,28 +268,51 @@ always @(posedge CLK_AUDIO) begin : i2c_slave
 	if(reset) begin
 		reset_r <= 1;
 		mt32_available <= 0;
+		mt32_mode <= 0;
+		mt32_rom <= 0;
+		mt32_sf <= 0;
+		mt32_newmode <= 0;
+		mt32_lcd_update <= 0;
+		sda_out <= 1;
+		i2c_cnt <= 0;
+		i2c_bcnt <= 0;
+		i2c_ack <= 0;
+		i2c_rw <= 0;
+		i2c_disp <= 0;
+		i2c_dispdata <= 0;
 	end
 end
 
+reg       video_old_de = 0;
+reg       video_old_vs = 0;
+reg [7:0] video_hcnt = 0;
+reg [6:0] video_vcnt = 0;
+reg [7:0] video_de_shift = 0;
 always @(posedge CLK_VIDEO) begin
-	reg old_de, old_vs;
-	reg [7:0] hcnt;
-	reg [6:0] vcnt;
-	reg [7:0] sh;
-
 	if(CE_PIXEL) begin
-		old_de <= VGA_DE;
-		old_vs <= VGA_VS;
+		video_old_de <= VGA_DE;
+		video_old_vs <= VGA_VS;
 
-		if(~&hcnt) hcnt <= hcnt + 1'd1;
-		sh <= (sh << 1) | (~old_de & VGA_DE);
-		if(sh[7]) hcnt <= 0;
+		if(~&video_hcnt) video_hcnt <= video_hcnt + 1'd1;
+		video_de_shift <= (video_de_shift << 1) | {7'd0, (~video_old_de & VGA_DE)};
+		if(video_de_shift[7]) video_hcnt <= 0;
 
-		if(old_de & ~VGA_DE & ~&vcnt) vcnt <= vcnt + 1'd1;
-		if(~old_vs & VGA_VS) vcnt <= 0;
+		if(video_old_de & ~VGA_DE & ~&video_vcnt) video_vcnt <= video_vcnt + 1'd1;
+		if(~video_old_vs & VGA_VS) video_vcnt <= 0;
 
-		mt32_lcd_en  <= mt32_available & ~hcnt[7] && (lcd_sz ? !vcnt[6] : !vcnt[6:5]);
-		mt32_lcd_pix <= lcd_data[{vcnt[5:3],hcnt[6:0]}][vcnt[2:0]];
+		mt32_lcd_en  <= mt32_available & ~video_hcnt[7] &&
+		                (lcd_sz ? ~video_vcnt[6] : (video_vcnt[6:5] == 2'b00));
+		mt32_lcd_pix <= lcd_data[{video_vcnt[5:3],video_hcnt[6:0]}][video_vcnt[2:0]];
+	end
+
+	if(reset) begin
+		video_old_de <= 0;
+		video_old_vs <= 0;
+		video_hcnt <= 0;
+		video_vcnt <= 0;
+		video_de_shift <= 0;
+		mt32_lcd_en <= 0;
+		mt32_lcd_pix <= 0;
 	end
 end
 

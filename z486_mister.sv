@@ -133,6 +133,7 @@ localparam CONF_STR = {
 	"P1OKL,Audio Boost,No,2x,4x;",
 	"P1oBC,Stereo Mix,none,25%,50%,100%;",
 	"P1oO,SB Swap L/R,Off,On;",
+	"P1OP,MT32 Volume Ctl,MIDI,Line-In;",
 	"-;",
 	"P2,Hardware;",
 	"P2O89,CPU Speed,Full,56 MHz,30 MHz,15 MHz;",
@@ -151,8 +152,32 @@ localparam CONF_STR = {
     "P2oQR,Joystick Axes,Timed,Count 8+141,Count 0+256,Count 6+256;",
     "P2oH,Joystick 1,Enabled,Disabled;",
     "P2oI,Joystick 2,Enabled,Disabled;",
+	"h0P3,MT32-pi;",
+	"h0P3-;",
+	"h0P3O[85],Use MT32-pi,Yes,No;",
+	"h0P3O[94:93],Show Info,No,Yes,LCD-On(non-FB),LCD-Auto(non-FB);",
+	"h0P3-;",
+	"h0P3-,Default Config:;",
+	"h0P3O[86],Synth,FluidSynth,Munt;",
+	"h0P3O[88:87],Munt ROM,MT-32 v1,MT-32 v2,CM-32L;",
+	"h0P3O[92:89],SoundFont,0,1,2,3,4,5,6,7;",
+	"h0P3-;",
+	"h0P3R[84],Reset Hanging Notes;",
 	"-;",
-	"R0,Reset and apply HDD;"
+	"R0,Reset and apply HDD;",
+	"I,",
+	"MT32-pi: SoundFont #0,",
+	"MT32-pi: SoundFont #1,",
+	"MT32-pi: SoundFont #2,",
+	"MT32-pi: SoundFont #3,",
+	"MT32-pi: SoundFont #4,",
+	"MT32-pi: SoundFont #5,",
+	"MT32-pi: SoundFont #6,",
+	"MT32-pi: SoundFont #7,",
+	"MT32-pi: MT-32 v1,",
+	"MT32-pi: MT-32 v2,",
+	"MT32-pi: CM-32L,",
+	"MT32-pi: Unknown mode;"
 };
 
 wire        clk_sys;
@@ -251,11 +276,13 @@ wire [35:0] ext_bus;
 wire [21:0] gamma_bus;
 wire [12:0] arx;
 wire [12:0] ary;
-wire [15:0] status_menumask = 16'd0;
+wire        mt32_available;
+wire        mt32_newmode;
+wire [15:0] status_menumask = {14'd0, mt32_newmode, mt32_available};
 wire [127:0] status_in = 128'd0;
 wire        status_set = 1'b0;
-wire        info_req = 1'b0;
-wire [7:0]  info = 8'd0;
+wire        info_req;
+wire [7:0]  info;
 wire [2:0]  ps2_kbd_led_status = 3'b000;
 wire [2:0]  ps2_kbd_led_use = 3'b000;
 wire        video_rotated = 1'b0;
@@ -779,30 +806,37 @@ wire [15:0] opl_l;
 wire [15:0] opl_r;
 wire [15:0] cd_l;
 wire [15:0] cd_r;
+wire [15:0] mt32_l;
+wire [15:0] mt32_r;
 wire        sb_volume_valid;
 wire [15:0] mix_cmp_l;
 wire [15:0] mix_cmp_r;
 wire [15:0] mix_pre_l = status[21:20] ? mix_cmp_l : mix_dry_l;
 wire [15:0] mix_pre_r = status[21:20] ? mix_cmp_r : mix_dry_r;
+wire  [4:0] vol_mt32_l = ~status[25] ? vol_midi_l : vol_en[4] ? vol_line_l : 5'd0;
+wire  [4:0] vol_mt32_r = ~status[25] ? vol_midi_r : vol_en[3] ? vol_line_r : 5'd0;
 
 acompr acompr_l(CLK_AUDIO, status[21], mix_dry_l, mix_cmp_l);
 acompr acompr_r(CLK_AUDIO, status[21], mix_dry_r, mix_cmp_r);
 
-sb_volume #(.NUM_CH(8), .SAMPLE_WIDTH(16)) sb_volume_inst (
+sb_volume #(.NUM_CH(10), .SAMPLE_WIDTH(16)) sb_volume_inst (
 	.clk(CLK_AUDIO),
 	.sbp(sbp),
 	.volumes_in({vol_master_l, vol_master_r,
 	             vol_voice_l,  vol_voice_r,
 	             vol_midi_l,   vol_midi_r,
-	             vol_cd_l,     vol_cd_r}),
+	             vol_cd_l,     vol_cd_r,
+	             vol_mt32_l,   vol_mt32_r}),
 	.samples_in({mix_pre_l,    mix_pre_r,
 	             sample_sb_l,  sample_sb_r,
 	             sample_opl_l, sample_opl_r,
-	             cdda_l,       cdda_r}),
+	             cdda_l,       cdda_r,
+	             mt32_i2s_l,   mt32_i2s_r}),
 	.samples_out({master_l, master_r,
 	              sb_l,     sb_r,
 	              opl_l,    opl_r,
-	              cd_l,     cd_r}),
+	              cd_l,     cd_r,
+	              mt32_l,   mt32_r}),
 	.valid(sb_volume_valid)
 );
 
@@ -818,12 +852,14 @@ always @(posedge CLK_AUDIO) begin
 		           + {2'b00, sample_cms_l, sample_cms_l[8:4]}
 		           + {sb_l_swap[15], sb_l_swap}
 		           + {opl_l[15], opl_l}
-		           + (vol_en[2] ? {cd_l[15], cd_l} : 17'd0);  // CD-DA (Redbook audio)
+		           + (vol_en[2] ? {cd_l[15], cd_l} : 17'd0)
+		           + (mt32_mute ? 17'd0 : {mt32_l[15], mt32_l});
 		mix_tmp_r <= spk_out
 		           + {2'b00, sample_cms_r, sample_cms_r[8:4]}
 		           + {sb_r_swap[15], sb_r_swap}
 		           + {opl_r[15], opl_r}
-		           + (vol_en[1] ? {cd_r[15], cd_r} : 17'd0);
+		           + (vol_en[1] ? {cd_r[15], cd_r} : 17'd0)
+		           + (mt32_mute ? 17'd0 : {mt32_r[15], mt32_r});
 	end
 
 	mix_dry_l <= (^mix_tmp_l[16:15]) ? {mix_tmp_l[16], {15{mix_tmp_l[15]}}} : mix_tmp_l[15:0];
@@ -972,9 +1008,9 @@ assign CLK_VIDEO     = clk_sys;
 assign CE_PIXEL      = core_ce_pixel;
 assign VIDEO_ARX     = arx;
 assign VIDEO_ARY     = ary;
-assign VGA_R         = gamma_r;
-assign VGA_G         = gamma_g;
-assign VGA_B         = gamma_b;
+assign VGA_R         = mt32_lcd ? {{2{mt32_lcd_pix}}, gamma_r[7:2]} : gamma_r;
+assign VGA_G         = mt32_lcd ? {{2{mt32_lcd_pix}}, gamma_g[7:2]} : gamma_g;
+assign VGA_B         = mt32_lcd ? {{2{mt32_lcd_pix}}, gamma_b[7:2]} : gamma_b;
 assign VGA_HS        = gamma_hs;
 assign VGA_VS        = gamma_vs;
 assign VGA_DE        = gamma_de;
@@ -1052,7 +1088,97 @@ wire uart_midi_mode = (uart_mode != 8'd0);
 assign UART_RTS      = 1'b0;
 assign UART_TXD      = uart_midi_mode ? mpu_uart_tx : debug_uart_tx;
 assign UART_DTR      = 1'b0;
-assign USER_OUT      = 7'h7F;
+
+wire        mt32_reset    = status[84] | reset_sync_r[2] | core_soft_reset_req;
+wire        mt32_disable  = status[85];
+wire        mt32_mode_req = ~status[86];
+wire  [1:0] mt32_rom_req  = status[88:87];
+wire  [7:0] mt32_sf_req   = {4'd0, status[92:89]};
+wire  [1:0] mt32_info     = status[94:93];
+wire [15:0] mt32_i2s_r;
+wire [15:0] mt32_i2s_l;
+wire  [7:0] mt32_mode;
+wire  [7:0] mt32_rom;
+wire  [7:0] mt32_sf;
+wire        mt32_lcd_en;
+wire        mt32_lcd_pix;
+wire        mt32_lcd_update;
+wire        mt32_mute = mt32_available & mt32_disable;
+
+mt32pi mt32pi_inst
+(
+	.CLK_AUDIO       (CLK_AUDIO),
+	.CLK_VIDEO       (clk_sys),
+	.CE_PIXEL        (core_ce_pixel),
+	.VGA_VS          (gamma_vs),
+	.VGA_DE          (gamma_de),
+	.USER_IN         (USER_IN),
+	.USER_OUT        (USER_OUT),
+	.reset           (mt32_reset),
+	.midi_tx         (mpu_uart_tx | mt32_mute),
+	.midi_rx         (),
+	.mt32_i2s_r      (mt32_i2s_r),
+	.mt32_i2s_l      (mt32_i2s_l),
+	.mt32_available  (mt32_available),
+	.mt32_mode_req   (mt32_mode_req),
+	.mt32_rom_req    (mt32_rom_req),
+	.mt32_sf_req     (mt32_sf_req),
+	.mt32_mode       (mt32_mode),
+	.mt32_rom        (mt32_rom),
+	.mt32_sf         (mt32_sf),
+	.mt32_newmode    (mt32_newmode),
+	.mt32_lcd_en     (mt32_lcd_en),
+	.mt32_lcd_pix    (mt32_lcd_pix),
+	.mt32_lcd_update (mt32_lcd_update)
+);
+
+reg       mt32_newmode_d = 1'b0;
+reg       mt32_info_req = 1'b0;
+reg [3:0] mt32_info_disp = 4'd0;
+always @(posedge clk_sys) begin
+	mt32_newmode_d <= mt32_newmode;
+	mt32_info_req <= (mt32_newmode_d ^ mt32_newmode) && (mt32_info == 2'd1);
+
+	mt32_info_disp <= (mt32_mode == 8'hA2) ? (4'd1 + mt32_sf[2:0]) :
+	                  (mt32_mode == 8'hA1 && mt32_rom == 0) ? 4'd9 :
+	                  (mt32_mode == 8'hA1 && mt32_rom == 1) ? 4'd10 :
+	                  (mt32_mode == 8'hA1 && mt32_rom == 2) ? 4'd11 : 4'd12;
+
+	if (mt32_reset) begin
+		mt32_newmode_d <= mt32_newmode;
+		mt32_info_req <= 1'b0;
+	end
+end
+assign info_req = mt32_info_req;
+assign info = {4'd0, mt32_info_disp};
+
+reg [31:0] mt32_lcd_timeout = 32'd0;
+reg        mt32_lcd_update_d = 1'b0;
+reg        mt32_lcd_on = 1'b0;
+always @(posedge clk_sys) begin
+	mt32_lcd_update_d <= mt32_lcd_update;
+
+	if (mt32_reset) begin
+		mt32_lcd_timeout <= 32'd0;
+		mt32_lcd_update_d <= mt32_lcd_update;
+		mt32_lcd_on <= 1'b0;
+	end
+	else begin
+		if (mt32_lcd_timeout != 0) mt32_lcd_timeout <= mt32_lcd_timeout - 1'd1;
+
+		if (mt32_info == 2'd2) mt32_lcd_on <= 1'b1;
+		else if (mt32_info != 2'd3) mt32_lcd_on <= 1'b0;
+		else begin
+			if (mt32_lcd_timeout == 0) mt32_lcd_on <= 1'b0;
+			if (mt32_lcd_update_d ^ mt32_lcd_update) begin
+				mt32_lcd_on <= 1'b1;
+				mt32_lcd_timeout <= CLOCK_RATE_HZ * 2;
+			end
+		end
+	end
+end
+
+wire mt32_lcd = mt32_lcd_on & mt32_lcd_en;
 
 endmodule
 
