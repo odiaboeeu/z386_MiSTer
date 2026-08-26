@@ -17,13 +17,13 @@ configurations. Video hardware provides VGA and ET4000-compatible SVGA modes.
 ## Trying It
 
 z486_MiSTer requires an SDRAM module. The SDRAM XS-D v2.5 module has been
-verified to work.
+verified to work. It also requires MiSTer main `MiSTer_20260823` or newer;
+run `Scripts` → `update` before installing the core.
 
 Download the latest build from the
 [releases page](https://github.com/nand2mario/z486_MiSTer/releases), then place
 the files as follows:
 
-- `MiSTer` in `/media/fat` after backing up the existing file
 - `z486_*.rbf` in `/media/fat/_Computer`
 - [boot0.rom](verilator/boot0.rom), [boot1.rom](verilator/boot1.rom), and disk
   images (`.vhd`) in `/media/fat/games/Z486`
