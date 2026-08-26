@@ -31,6 +31,12 @@ The CD-ROM model implements the ATAPI packet commands used by DOS CD drivers.
 Audio-track playback is accepted for software compatibility but is not rendered
 by the simulator.
 
+## SVGA framebuffer formats
+
+The simulator defaults to the MiSTer core's BGR/1555 framebuffer settings.
+Use `--fb-rgb` or `--fb-565` to test software that expects the alternate channel
+order or 16-bit format; `--fb-bgr` and `--fb-1555` restore the defaults.
+
 ## Live control socket
 
 Start the simulator with a localhost TCP control socket:

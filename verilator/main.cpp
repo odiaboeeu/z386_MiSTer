@@ -98,17 +98,22 @@ static std::array<Pixel, 256> fb_palette = [] {
 	palette.fill(Pixel{0xff, 0x00, 0x00, 0x00});
 	return palette;
 }();
+static bool fb_1555 = true;
+static bool fb_bgr = true;
 
 static uint8_t expand_dac_color(uint8_t value) {
 	return static_cast<uint8_t>((value << 2) | (value >> 4));
 }
 
-static bool render_svga8_frame(Pixel* pixels, int& width, int& height) {
+static bool render_svga_frame(Pixel* pixels, int& width, int& height) {
 	const uint8_t flags = tb.fb_flags;
-	if (tb.fb_off || (flags & 0x04) || (flags & 0x03) != 0x01) return false;
+	const uint8_t depth = flags & 0x03;
+	if (tb.fb_off || (flags & 0x04) || (depth != 0x01 && depth != 0x02))
+		return false;
 
 	const size_t base = static_cast<size_t>(tb.fb_start_addr) << 2;
 	const size_t stride = static_cast<size_t>(tb.fb_stride) << 3;
+	const size_t bytes_per_pixel = depth == 0x02 ? 2 : 1;
 	const int fb_width = std::min<int>(static_cast<int>(tb.fb_width) << 3, H_RES);
 	const int fb_height = std::min<int>(
 		(flags & 0x08) ? static_cast<int>(tb.fb_height) / 2
@@ -117,13 +122,33 @@ static bool render_svga8_frame(Pixel* pixels, int& width, int& height) {
 	if (fb_width <= 0 || fb_height <= 0 || stride == 0 || base >= fb_mem.size())
 		return false;
 	const size_t last_row = base + static_cast<size_t>(fb_height - 1) * stride;
-	if (last_row >= fb_mem.size() || static_cast<size_t>(fb_width) > fb_mem.size() - last_row)
+	const size_t row_bytes = static_cast<size_t>(fb_width) * bytes_per_pixel;
+	if (last_row >= fb_mem.size() || row_bytes > fb_mem.size() - last_row)
 		return false;
 
 	for (int y = 0; y < fb_height; ++y) {
 		const size_t row = base + static_cast<size_t>(y) * stride;
-		for (int x = 0; x < fb_width; ++x)
-			pixels[y * H_RES + x] = fb_palette[fb_mem[row + x]];
+		for (int x = 0; x < fb_width; ++x) {
+			if (depth == 0x01) {
+				pixels[y * H_RES + x] = fb_palette[fb_mem[row + x]];
+			} else {
+				const size_t offset = row + static_cast<size_t>(x) * 2;
+				const uint16_t packed = static_cast<uint16_t>(fb_mem[offset]) |
+				                        (static_cast<uint16_t>(fb_mem[offset + 1]) << 8);
+				const uint8_t low = static_cast<uint8_t>((packed & 0x1f) * 255 / 31);
+				const uint8_t green = fb_1555
+					? static_cast<uint8_t>(((packed >> 5) & 0x1f) * 255 / 31)
+					: static_cast<uint8_t>(((packed >> 5) & 0x3f) * 255 / 63);
+				const uint8_t high = static_cast<uint8_t>(
+					((packed >> (fb_1555 ? 10 : 11)) & 0x1f) * 255 / 31);
+				pixels[y * H_RES + x] = Pixel{
+					0xff,
+					fb_bgr ? high : low,
+					green,
+					fb_bgr ? low : high,
+				};
+			}
+		}
 	}
 	width = fb_width;
 	height = fb_height;
@@ -910,7 +935,7 @@ static bool dump_screen_png(const fs::path& path, int width, int height) {
 }
 
 static void usage() {
-	cout << "Usage: Vz486_mister_sim [--trace] [--trace-start sim_time] [--trace-file path] [--headless] [--end sim_time] [--disk path] [--cdrom iso] [--floppy path] [--boot0 path] [--boot1 path] [--ram-mb 16|32|64|128] [--cpu-speed full|56|30|15] [--cpu-speed-at sim_time:full|56|30|15] [--opl2|--opl3] [--variable-vsync] [--vga-border|--no-vga-border] [--enter-at sim_time] [--key-at sim_time:key] [--key-down-at sim_time:key] [--key-up-at sim_time:key] [--key-on-text substring:key] [--mouse-at sim_time:dx:dy[:buttons]] [--control-port N] [--control-bind IPv4] [--ctrl-alt-del-at sim_time] [--screen-at sim_time] [--log-eip CS:EIP] [--screenshot-dir path] [--screenshot-interval sim_time] [--stop-on-text substring] [--no-ide] [--record] [--checkpoint-dir path] [--checkpoint-interval-sec N] [--checkpoint-keep N] [--restore path]  (all times are sim_time = 2*cycle; mouse buttons are bits L/R/M)\n";
+	cout << "Usage: Vz486_mister_sim [--trace] [--trace-start sim_time] [--trace-file path] [--headless] [--end sim_time] [--disk path] [--cdrom iso] [--floppy path] [--boot0 path] [--boot1 path] [--ram-mb 16|32|64|128] [--cpu-speed full|56|30|15] [--cpu-speed-at sim_time:full|56|30|15] [--opl2|--opl3] [--variable-vsync] [--vga-border|--no-vga-border] [--fb-bgr|--fb-rgb] [--fb-1555|--fb-565] [--enter-at sim_time] [--key-at sim_time:key] [--key-down-at sim_time:key] [--key-up-at sim_time:key] [--key-on-text substring:key] [--mouse-at sim_time:dx:dy[:buttons]] [--control-port N] [--control-bind IPv4] [--ctrl-alt-del-at sim_time] [--screen-at sim_time] [--log-eip CS:EIP] [--screenshot-dir path] [--screenshot-interval sim_time] [--stop-on-text substring] [--no-ide] [--record] [--checkpoint-dir path] [--checkpoint-interval-sec N] [--checkpoint-keep N] [--restore path]  (all times are sim_time = 2*cycle; mouse buttons are bits L/R/M)\n";
 }
 
 int main(int argc, char** argv) {
@@ -1026,6 +1051,14 @@ int main(int argc, char** argv) {
 		} else if (arg == "--no-vga-border") {
 			vga_border = false;
 			vga_border_explicit = true;
+		} else if (arg == "--fb-bgr") {
+			fb_bgr = true;
+		} else if (arg == "--fb-rgb") {
+			fb_bgr = false;
+		} else if (arg == "--fb-1555") {
+			fb_1555 = true;
+		} else if (arg == "--fb-565") {
+			fb_1555 = false;
 		} else if (arg == "--enter-at" && i + 1 < argc) {
 			enter_cycles.push_back(std::stoull(argv[++i]) / 2);   // sim_time -> cycles
 		} else if (arg == "--key-at" && i + 1 < argc) {
@@ -1510,7 +1543,7 @@ int main(int argc, char** argv) {
 
 		if (tb.video_vs && !prev_vs) {
 			saw_video_sync = true;
-			const bool svga_frame = render_svga8_frame(
+			const bool svga_frame = render_svga_frame(
 				presentbuffer, resolution_x, resolution_y);
 			if (!svga_frame) {
 				if (frame_x_max >= 640) resolution_x = std::min(frame_x_max, H_RES);
