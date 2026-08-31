@@ -73,7 +73,8 @@ PROFILES: dict[str, Profile] = {
         assignments=(
             ("OPTIMIZE_POWER_DURING_FITTING", "OFF"),
             ("FINAL_PLACEMENT_OPTIMIZATION", "ALWAYS"),
-            ("FITTER_EFFORT", '"STANDARD FIT"'),
+            ("FITTER_EFFORT", '"AUTO FIT"'),
+            ("ENABLE_BENEFICIAL_SKEW_OPTIMIZATION", "ON"),
             ("OPTIMIZATION_MODE", '"HIGH PERFORMANCE EFFORT"'),
             ("ALLOW_POWER_UP_DONT_CARE", "ON"),
             ("QII_AUTO_PACKED_REGISTERS", '"SPARSE AUTO"'),
